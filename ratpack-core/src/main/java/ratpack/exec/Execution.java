@@ -20,6 +20,7 @@ import com.google.common.reflect.TypeToken;
 import io.netty.channel.EventLoop;
 import ratpack.exec.internal.DefaultExecution;
 import ratpack.exec.internal.ThreadBinding;
+import ratpack.exec.trace.ExecutionTraceException;
 import ratpack.func.Action;
 import ratpack.func.Block;
 import ratpack.registry.MutableRegistry;
@@ -192,5 +193,9 @@ public interface Execution extends MutableRegistry {
    * @see ExecInterceptor
    */
   void addInterceptor(ExecInterceptor execInterceptor, Block continuation) throws Exception;
+
+  void enableTrace();
+
+  ExecutionTraceException getTrace();
 
 }

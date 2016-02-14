@@ -182,22 +182,22 @@ public interface Promise<T> {
    */
   default Promise<T> onError(Predicate<? super Throwable> predicate, Action<? super Throwable> errorHandler) {
     return transform(up -> down ->
-        up.connect(down.onError(throwable -> {
-          if (predicate.apply(throwable)) {
-            try {
-              errorHandler.execute(throwable);
-            } catch (Throwable e) {
-              if (e != throwable) {
-                e.addSuppressed(throwable);
-              }
-              down.error(e);
-              return;
+      up.connect(down.onError(throwable -> {
+        if (predicate.apply(throwable)) {
+          try {
+            errorHandler.execute(throwable);
+          } catch (Throwable e) {
+            if (e != throwable) {
+              e.addSuppressed(throwable);
             }
-            down.complete();
-          } else {
-            down.error(throwable);
+            down.error(e);
+            return;
           }
-        }))
+          down.complete();
+        } else {
+          down.error(throwable);
+        }
+      }))
     );
   }
 
@@ -297,16 +297,18 @@ public interface Promise<T> {
    * @return a promise for the transformed value
    */
   default <O> Promise<O> map(Function<? super T, ? extends O> transformer) {
-    return transform(up -> down -> up.connect(
-        down.<T>onSuccess(value -> {
-          try {
-            O apply = transformer.apply(value);
-            down.success(apply);
-          } catch (Throwable e) {
-            down.error(e);
-          }
-        })
-      )
+    return transform(up ->
+      down ->
+        up.connect(
+          down.<T>onSuccess(value -> {
+            try {
+              O apply = transformer.apply(value);
+              down.success(apply);
+            } catch (Throwable e) {
+              down.error(e);
+            }
+          })
+        )
     );
   }
 
@@ -396,9 +398,9 @@ public interface Promise<T> {
    */
   default Promise<T> next(@NonBlocking Action<? super T> action) {
     return nextOp(v ->
-        Operation.of(() ->
-            action.execute(v)
-        )
+      Operation.of(() ->
+        action.execute(v)
+      )
     );
   }
 
@@ -452,13 +454,13 @@ public interface Promise<T> {
    */
   default Promise<T> nextOp(Function<? super T, ? extends Operation> function) {
     return transform(up -> down -> up.connect(
-        down.<T>onSuccess(value ->
-            function.apply(value)
-              .onError(down::error)
-              .then(() ->
-                  down.success(value)
-              )
-        )
+      down.<T>onSuccess(value ->
+        function.apply(value)
+          .onError(down::error)
+          .then(() ->
+            down.success(value)
+          )
+      )
       )
     );
   }
@@ -572,14 +574,14 @@ public interface Promise<T> {
    */
   default Promise<T> mapError(Function<? super Throwable, ? extends T> transformer) {
     return transform(up -> down ->
-        up.connect(down.onError(throwable -> {
-          try {
-            T transformed = transformer.apply(throwable);
-            down.success(transformed);
-          } catch (Throwable t) {
-            down.error(t);
-          }
-        }))
+      up.connect(down.onError(throwable -> {
+        try {
+          T transformed = transformer.apply(throwable);
+          down.success(transformed);
+        } catch (Throwable t) {
+          down.error(t);
+        }
+      }))
     );
   }
 
@@ -750,7 +752,8 @@ public interface Promise<T> {
    * @return a promise for the transformed value
    */
   default <O> Promise<O> flatMap(Function<? super T, ? extends Promise<O>> transformer) {
-    return transform(up -> down ->
+    return transform(up ->
+      down ->
         up.connect(down.<T>onSuccess(value -> {
           try {
             transformer.apply(value).onError(down::error).then(down::success);
@@ -837,26 +840,26 @@ public interface Promise<T> {
    */
   default Promise<T> route(Predicate<? super T> predicate, Action<? super T> action) {
     return transform(up -> down ->
-        up.connect(down.<T>onSuccess(value -> {
-          boolean apply;
+      up.connect(down.<T>onSuccess(value -> {
+        boolean apply;
+        try {
+          apply = predicate.apply(value);
+        } catch (Throwable e) {
+          down.error(e);
+          return;
+        }
+
+        if (apply) {
           try {
-            apply = predicate.apply(value);
+            action.execute(value);
+            down.complete();
           } catch (Throwable e) {
             down.error(e);
-            return;
           }
-
-          if (apply) {
-            try {
-              action.execute(value);
-              down.complete();
-            } catch (Throwable e) {
-              down.error(e);
-            }
-          } else {
-            down.success(value);
-          }
-        }))
+        } else {
+          down.success(value);
+        }
+      }))
     );
   }
 
@@ -943,11 +946,11 @@ public interface Promise<T> {
    */
   default Promise<T> defer(Action<? super Runnable> releaser) {
     return transform(up -> down ->
-        Promise.of(innerDown ->
-            releaser.execute((Runnable) () -> innerDown.success(true))
-        ).then(v ->
-            up.connect(down)
-        )
+      Promise.of(innerDown ->
+        releaser.execute((Runnable) () -> innerDown.success(true))
+      ).then(v ->
+        up.connect(down)
+      )
     );
   }
 
@@ -1028,16 +1031,16 @@ public interface Promise<T> {
    */
   default Promise<T> wiretap(Action<? super Result<T>> listener) {
     return transform(up -> down ->
-        up.connect(down.<T>onSuccess(value -> {
-          try {
-            listener.execute(Result.success(value));
-          } catch (Throwable t) {
-            down.error(t);
-            return;
-          }
+      up.connect(down.<T>onSuccess(value -> {
+        try {
+          listener.execute(Result.success(value));
+        } catch (Throwable t) {
+          down.error(t);
+          return;
+        }
 
-          down.success(value);
-        }))
+        down.success(value);
+      }))
     );
   }
 

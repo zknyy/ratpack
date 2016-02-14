@@ -74,10 +74,10 @@ public class DefaultPromise<T> implements Promise<T> {
   }
 
   private void throwError(Throwable throwable) {
-    DefaultExecution.require().delimit(h ->
-        h.resume(() -> {
-          throw Exceptions.toException(throwable);
-        })
+    DefaultExecution.require().delimit(Thread.currentThread().getStackTrace(), h ->
+      h.resume(() -> {
+        throw Exceptions.toException(throwable);
+      })
     );
   }
 

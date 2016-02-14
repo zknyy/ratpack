@@ -20,6 +20,7 @@ import io.netty.channel.EventLoop;
 import ratpack.exec.internal.DefaultExecution;
 import ratpack.exec.internal.DefaultPromise;
 import ratpack.exec.internal.ThreadBinding;
+import ratpack.exec.trace.ExecutionTrace;
 import ratpack.func.Block;
 import ratpack.func.Factory;
 
@@ -52,37 +53,39 @@ public abstract class Blocking {
    * @return a promise for the return value of the given blocking operation
    */
   public static <T> Promise<T> get(Factory<T> factory) {
+    StackTraceElement[] stackTrace = ExecutionTrace.trace(3);
     return new DefaultPromise<>(downstream -> {
       DefaultExecution execution = DefaultExecution.require();
       EventLoop eventLoop = execution.getEventLoop();
-      execution.delimit(continuation ->
-          eventLoop.execute(() ->
-              CompletableFuture.supplyAsync(
-                new Supplier<Result<T>>() {
-                  Result<T> result;
+      execution.delimit(stackTrace, continuation ->
+        eventLoop.execute(() ->
+          CompletableFuture.supplyAsync(
+            new Supplier<Result<T>>() {
+              Result<T> result;
 
-                  @Override
-                  public Result<T> get() {
+              @Override
+              public Result<T> get() {
+                try {
+                  DefaultExecution.THREAD_BINDING.set(execution);
+                  intercept(execution, execution.getAllInterceptors().iterator(), () -> {
                     try {
-                      DefaultExecution.THREAD_BINDING.set(execution);
-                      intercept(execution, execution.getAllInterceptors().iterator(), () -> {
-                        try {
-                          result = Result.success(factory.create());
-                        } catch (Throwable e) {
-                          result = Result.error(e);
-                        }
-                      });
-                      return result;
+                      result = Result.success(factory.create());
                     } catch (Throwable e) {
-                      DefaultExecution.interceptorError(e);
-                      return result;
-                    } finally {
-                      DefaultExecution.THREAD_BINDING.remove();
+                      execution.addTrace(e);
+                      result = Result.error(e);
                     }
-                  }
-                }, execution.getController().getBlockingExecutor()
-              ).thenAcceptAsync(v -> continuation.resume(() -> downstream.accept(v)), eventLoop)
-          )
+                  });
+                  return result;
+                } catch (Throwable e) {
+                  DefaultExecution.interceptorError(e);
+                  return result;
+                } finally {
+                  DefaultExecution.THREAD_BINDING.remove();
+                }
+              }
+            }, execution.getController().getBlockingExecutor()
+          ).thenAcceptAsync(v -> continuation.resume(() -> downstream.accept(v)), eventLoop)
+        )
       );
     });
   }
@@ -190,32 +193,32 @@ public abstract class Blocking {
     CountDownLatch latch = new CountDownLatch(1);
     AtomicReference<Result<T>> resultReference = new AtomicReference<>();
 
-    backing.delimit(continuation ->
-        promise.connect(
-          new Downstream<T>() {
-            @Override
-            public void success(T value) {
-              unlatch(Result.success(value));
-            }
-
-            @Override
-            public void error(Throwable throwable) {
-              unlatch(Result.error(throwable));
-            }
-
-            @Override
-            public void complete() {
-              unlatch(Result.success(null));
-            }
-
-            private void unlatch(Result<T> result) {
-              continuation.resume(() -> {
-                resultReference.set(result);
-                latch.countDown();
-              });
-            }
+    backing.delimit(Thread.currentThread().getStackTrace(), continuation ->
+      promise.connect(
+        new Downstream<T>() {
+          @Override
+          public void success(T value) {
+            unlatch(Result.success(value));
           }
-        )
+
+          @Override
+          public void error(Throwable throwable) {
+            unlatch(Result.error(throwable));
+          }
+
+          @Override
+          public void complete() {
+            unlatch(Result.success(null));
+          }
+
+          private void unlatch(Result<T> result) {
+            continuation.resume(() -> {
+              resultReference.set(result);
+              latch.countDown();
+            });
+          }
+        }
+      )
     );
 
     backing.eventLoopDrain();

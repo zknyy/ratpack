@@ -28,6 +28,8 @@ import org.reactivestreams.Subscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import ratpack.exec.*;
+import ratpack.exec.trace.ExecutionTrace;
+import ratpack.exec.trace.ExecutionTraceException;
 import ratpack.func.Action;
 import ratpack.func.Block;
 import ratpack.registry.MutableRegistry;
@@ -49,6 +51,7 @@ public class DefaultExecution implements Execution {
   public final static FastThreadLocal<DefaultExecution> THREAD_BINDING = new FastThreadLocal<>();
 
   private ExecStream execStream;
+  private Deque<StackTraceElement[]> traceElements = new ArrayDeque<>();
 
   private final ExecControllerInternal controller;
   private final EventLoop eventLoop;
@@ -61,6 +64,7 @@ public class DefaultExecution implements Execution {
 
   private List<ExecInterceptor> adhocInterceptors;
   private Iterable<? extends ExecInterceptor> interceptors;
+  private boolean trace = true;
 
   public DefaultExecution(
     ExecControllerInternal controller,
@@ -111,36 +115,38 @@ public class DefaultExecution implements Execution {
 
   public static <T> TransformablePublisher<T> stream(Publisher<T> publisher) {
     return Streams.transformable(subscriber -> require().delimitStream(continuation ->
-        publisher.subscribe(new Subscriber<T>() {
-          @Override
-          public void onSubscribe(final Subscription subscription) {
-            continuation.event(() ->
-                subscriber.onSubscribe(subscription)
-            );
-          }
+      publisher.subscribe(new Subscriber<T>() {
+        @Override
+        public void onSubscribe(final Subscription subscription) {
+          continuation.event(() ->
+            subscriber.onSubscribe(subscription)
+          );
+        }
 
-          @Override
-          public void onNext(final T element) {
-            continuation.event(() -> subscriber.onNext(element));
-          }
+        @Override
+        public void onNext(final T element) {
+          continuation.event(() -> subscriber.onNext(element));
+        }
 
-          @Override
-          public void onComplete() {
-            continuation.complete(subscriber::onComplete);
-          }
+        @Override
+        public void onComplete() {
+          continuation.complete(subscriber::onComplete);
+        }
 
-          @Override
-          public void onError(final Throwable cause) {
-            continuation.complete(() -> subscriber.onError(cause));
-          }
-        })
+        @Override
+        public void onError(final Throwable cause) {
+          continuation.complete(() -> subscriber.onError(cause));
+        }
+      })
     ));
   }
 
   public static <T> Upstream<T> upstream(Upstream<T> upstream) {
+    StackTraceElement[] stackTrace = ExecutionTrace.trace(3);
     return downstream -> {
       final AtomicBoolean fired = new AtomicBoolean();
-      require().delimit(continuation -> {
+      DefaultExecution execution = require();
+      execution.delimit(stackTrace, continuation -> {
           try {
             upstream.connect(new Downstream<T>() {
               @Override
@@ -149,6 +155,7 @@ public class DefaultExecution implements Execution {
                   LOGGER.error("", new OverlappingExecutionException("promise already fulfilled", throwable));
                   return;
                 }
+                execution.addTrace(throwable);
                 continuation.resume(() -> downstream.error(throwable));
               }
 
@@ -186,8 +193,8 @@ public class DefaultExecution implements Execution {
     return eventLoop;
   }
 
-  public void delimit(Action<? super Continuation> segment) {
-    execStream.enqueue(() -> execStream = new SingleEventExecStream(execStream, segment));
+  public void delimit(StackTraceElement[] stackTrace, Action<? super Continuation> segment) {
+    execStream.enqueue(() -> execStream = new SingleEventExecStream(execStream, segment, stackTrace));
     drain();
   }
 
@@ -310,6 +317,26 @@ public class DefaultExecution implements Execution {
   }
 
   @Override
+  public void enableTrace() {
+    this.trace = true;
+  }
+
+  @Override
+  public ExecutionTraceException getTrace() {
+    ExecutionTraceException exception = new ExecutionTraceException();
+    addTrace(exception);
+    return exception;
+  }
+
+  public void addTrace(Throwable throwable) {
+    for (StackTraceElement[] traceElement : traceElements) {
+      ExecutionTraceException segment = new ExecutionTraceException();
+      segment.setStackTrace(traceElement);
+      throwable.addSuppressed(segment);
+    }
+  }
+
+  @Override
   public <T> void remove(TypeToken<T> type) throws NotInRegistryException {
     registry.remove(type);
   }
@@ -395,13 +422,15 @@ public class DefaultExecution implements Execution {
     final ExecStream parent;
 
     Action<? super Continuation> initial;
+    private final StackTraceElement[] stackTrace;
     Block resume;
     boolean resumed;
     Queue<Block> segments;
 
-    public SingleEventExecStream(ExecStream parent, Action<? super Continuation> initial) {
+    public SingleEventExecStream(ExecStream parent, Action<? super Continuation> initial, StackTraceElement[] stackTrace) {
       this.parent = parent;
       this.initial = initial;
+      this.stackTrace = stackTrace;
     }
 
     @Override
@@ -410,6 +439,7 @@ public class DefaultExecution implements Execution {
         if (segments == null || segments.isEmpty()) {
           if (resume == null) {
             if (resumed) {
+              traceElements.pop();
               execStream = parent;
               return execStream.exec();
             } else {
@@ -423,6 +453,7 @@ public class DefaultExecution implements Execution {
         } else {
           Block segment = segments.poll();
           if (segment == null) {
+            traceElements.pop();
             execStream = parent;
             return execStream.exec();
           } else {
@@ -431,6 +462,9 @@ public class DefaultExecution implements Execution {
           }
         }
       } else {
+        if (stackTrace != null) {
+          traceElements.push(stackTrace);
+        }
         initial.execute(this);
         initial = null;
         return true;
